@@ -1,0 +1,6 @@
+data/
+.env
+docs/
+.venv/
+*.tgz
+__pycache__/

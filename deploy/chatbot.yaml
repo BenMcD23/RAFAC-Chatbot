@@ -1,0 +1,108 @@
+# Docs Q&A over the RAFAC controlled documents. Not public: the only caller is
+# the SMS API (POST /chat/ask), which does the Google auth and staff check, so
+# this service has no auth of its own. The NetworkPolicy below enforces that.
+#
+# The index isn't built here. It's built on a GPU PC and uploaded into the
+# volume by push_index.sh, then this pod is restarted to load it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chatbot-data
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatbot
+spec:
+  replicas: 1
+  # One pod owns the volume and Chroma wants a single process; a few seconds
+  # of downtime on deploy is fine for this.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: chatbot
+  template:
+    metadata:
+      labels:
+        app: chatbot
+    spec:
+      # People use it directly, so it lives on home (ADR 0004). The image is
+      # amd64-only, and local-path pins the volume to this node anyway.
+      nodeSelector:
+        role: interactive
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: chatbot
+          image: ghcr.io/benmcd23/chatbot
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: chatbot-config
+            - secretRef:
+                name: chatbot-secrets
+          startupProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+          resources:
+            # ~1GiB for torch + the embedding model; Chroma's index is small.
+            requests:
+              cpu: 100m
+              memory: 1Gi
+            limits:
+              memory: 3Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: chatbot-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chatbot
+spec:
+  selector:
+    app: chatbot
+  ports:
+    - port: 80
+      targetPort: 8000
+---
+# Only the SMS API (prod and dev) may call this, since it has no auth itself.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: chatbot-callers
+spec:
+  podSelector:
+    matchLabels:
+      app: chatbot
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [sms-prod, sms-dev]
+          podSelector:
+            matchLabels:
+              app: sms-api
+      ports:
+        - port: 8000

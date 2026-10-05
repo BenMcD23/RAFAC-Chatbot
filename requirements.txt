@@ -1,0 +1,15 @@
+# Install torch first: the CUDA build on a GPU PC (see README), the CPU build in the Dockerfile.
+# chromadb is pinned to the same version locally and in the image, because the index
+# is built on the PC and opened in the cluster.
+torch
+sentence-transformers==6.1.0
+transformers==5.18.0
+chromadb==1.5.9
+pymupdf==1.28.2
+python-docx==1.2.0
+openai==3.24.0
+fastapi==0.142.2
+uvicorn==0.54.0
+python-dotenv==1.2.4
+PyYAML==6.0.3
+tqdm==4.70.1

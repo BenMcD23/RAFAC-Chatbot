@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAFAC Docs Q&amp;A</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  textarea { width: 100%; box-sizing: border-box; font: inherit; }
+  #answer { white-space: pre-wrap; background: #f4f4f4; padding: 1rem; }
+  #sources li { margin-bottom: .75rem; }
+  .snippet { color: #555; font-size: .9em; }
+</style>
+</head>
+<body>
+<h1>RAFAC Docs Q&amp;A</h1>
+<label for="q">Question</label>
+<textarea id="q" rows="3"></textarea>
+<p><button id="ask">Ask</button> <span id="status"></span></p>
+<div id="answer" hidden></div>
+<ol id="sources"></ol>
+<script>
+const q = document.getElementById("q"), btn = document.getElementById("ask"),
+      status = document.getElementById("status"), ans = document.getElementById("answer"),
+      list = document.getElementById("sources");
+
+async function ask() {
+  const question = q.value.trim();
+  if (!question) return;
+  btn.disabled = true; status.textContent = "Thinking…"; ans.hidden = true; list.replaceChildren();
+  try {
+    const r = await fetch("/ask", { method: "POST", headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ question }) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    ans.textContent = data.answer; ans.hidden = false;
+    for (const s of data.sources) {
+      const li = document.createElement("li"), a = document.createElement("a"), p = document.createElement("div");
+      li.value = s.n;
+      a.href = s.url; a.target = "_blank"; a.rel = "noopener"; a.textContent = s.filename;
+      p.className = "snippet"; p.textContent = s.snippet;
+      li.append(a, s.location ? ` (${s.location})` : "", p);
+      list.append(li);
+    }
+    status.textContent = "";
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+btn.addEventListener("click", ask);
+q.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } });
+</script>
+</body>
+</html>

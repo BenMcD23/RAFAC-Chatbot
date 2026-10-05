@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: chatbot
+
+resources:
+  - chatbot.yaml
+  - sealed-secret.yaml
+
+# Non-secret settings. The hash suffix means a change restarts the pod.
+configMapGenerator:
+  - name: chatbot-config
+    literals:
+      - LLM_BASE_URL=https://api.groq.com/openai/v1
+      - LLM_MODEL=openai/gpt-oss-120b
+      # A symlink that push_index.sh swaps to the newest uploaded index.
+      - CHROMA_DIR=/data/current
+
+images:
+  - name: ghcr.io/benmcd23/chatbot
+    newTag: latest
