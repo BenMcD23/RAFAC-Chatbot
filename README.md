@@ -29,6 +29,7 @@ python cli.py ingest
 - Re-runs are incremental: only new or changed files are re-embedded (tracked in `data/state.json`), and deleted or newly excluded files are removed from the index.
 - The summary lists failed files and files with no extractable text (scanned PDFs that need OCR).
 - To rebuild from scratch, run `rm -rf data/`.
+- `INDEX_VERSION` in `ingest.py` goes up when what's stored per chunk changes, and the next ingest then redoes every file. Version 2 added per-paragraph page/para positions and title-prefixed embeddings, so the first `./push_index.sh` after upgrading re-embeds everything.
 
 ## Ask
 
@@ -38,6 +39,42 @@ uvicorn app:app --host 0.0.0.0 --port 8000      # then open http://localhost:800
 ```
 
 Endpoints: `GET /`, `POST /ask {"question": "..."}`, `GET /health`.
+
+### How an answer is built
+
+1. The question is embedded and the 25 nearest chunks are pulled from Chroma. Each chunk is embedded with its document title and section on top, so questions that name a document find it.
+2. A cross-encoder (`RERANK_MODEL`, default `cross-encoder/ms-marco-MiniLM-L6-v2`) re-scores those 25 against the question, and the best 6 go to the LLM. Fewer, better chunks give better answers and use fewer tokens of the provider's daily limit. If the reranker can't load, the embedding order is used.
+3. The LLM replies in JSON: an answer with `[n]` citations, plus a verbatim quote from each source it cites (`cite.py`).
+4. Each quote is checked against the chunk text. A quote that isn't really there is dropped, so a highlighted line is always one the document contains. The quote's character offsets are mapped back to the page and paragraph number it came from.
+5. Only cited sources are returned, renumbered in order of use. If nothing answers the question, `related` lists the closest documents instead.
+
+`POST /ask` returns:
+
+```json
+{
+  "answer": "Cadets may stay overnight with Wing approval [1].",
+  "found": true,
+  "sources": [{
+    "n": 1, "filename": "ACP 20.pdf", "location": "page 14, para 12",
+    "url": "https://rafac.sharepoint.com/...ACP%2020.pdf#page=14",
+    "snippet": "...", "score": 7.1, "text": "<the whole chunk>",
+    "quotes": [{"start": 120, "end": 188, "text": "...", "location": "page 14, para 12", "page": 14}]
+  }],
+  "related": []
+}
+```
+
+PDF links carry `#page=N`, which browser PDF viewers open at that page.
+
+## Tests
+
+```bash
+pip install pytest ruff
+pytest -q
+ruff check --isolated --line-length 120 --select E,F,W,I .
+```
+
+The tests ingest a real Word document and PDF, then answer with a faked LLM. The models are faked in `conftest.py`, so the tests never download anything or call a provider. CI runs them on every PR and before every deploy.
 
 ## Eval
 

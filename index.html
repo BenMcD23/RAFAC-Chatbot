@@ -5,11 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RAFAC Docs Q&amp;A</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
-  textarea { width: 100%; box-sizing: border-box; font: inherit; }
-  #answer { white-space: pre-wrap; background: #f4f4f4; padding: 1rem; }
-  #sources li { margin-bottom: .75rem; }
-  .snippet { color: #555; font-size: .9em; }
+  body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #1a1a1a; }
+  textarea { width: 100%; box-sizing: border-box; font: inherit; padding: .5rem; }
+  #answer { white-space: pre-wrap; background: #f4f4f4; padding: 1rem; border-radius: 6px; }
+  .cite { font: .75em/1 ui-monospace, monospace; padding: .1em .35em; margin: 0 .1em; border-radius: 4px;
+          background: #dbe7ff; color: #1d3f8a; text-decoration: none; vertical-align: super; }
+  #sources > li { margin-bottom: 1rem; scroll-margin-top: 1rem; }
+  #sources > li:target { outline: 2px solid #1d3f8a; outline-offset: 4px; border-radius: 4px; }
+  .loc { color: #555; }
+  blockquote { margin: .4rem 0 0; padding: .4rem .75rem; border-left: 3px solid #e0b100; background: #fff8db; }
+  blockquote small { display: block; color: #555; margin-top: .2rem; }
+  details pre { white-space: pre-wrap; font: inherit; font-size: .9em; background: #f8f8f8; padding: .75rem; }
+  mark { background: #ffe58a; }
 </style>
 </head>
 <body>
@@ -18,30 +25,74 @@
 <textarea id="q" rows="3"></textarea>
 <p><button id="ask">Ask</button> <span id="status"></span></p>
 <div id="answer" hidden></div>
+<h2 id="sources-title" hidden>Sources</h2>
 <ol id="sources"></ol>
 <script>
-const q = document.getElementById("q"), btn = document.getElementById("ask"),
-      status = document.getElementById("status"), ans = document.getElementById("answer"),
-      list = document.getElementById("sources");
+const $ = id => document.getElementById(id);
+const q = $("q"), btn = $("ask"), status = $("status"), ans = $("answer"), list = $("sources"), title = $("sources-title");
+
+function el(tag, props = {}, ...children) {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...children.filter(c => c !== null && c !== undefined && c !== ""));
+  return e;
+}
+
+// [n] in the answer becomes a link to source n.
+function renderAnswer(text, known) {
+  ans.replaceChildren();
+  let last = 0;
+  for (const m of text.matchAll(/\[(\d+)\]/g)) {
+    ans.append(text.slice(last, m.index));
+    const n = Number(m[1]);
+    ans.append(known.has(n) ? el("a", { className: "cite", href: `#source-${n}`, textContent: n }) : m[0]);
+    last = m.index + m[0].length;
+  }
+  ans.append(text.slice(last));
+}
+
+// The chunk text with every verified quote marked, so the exact lines stand out in context.
+function highlighted(text, quotes) {
+  const pre = el("pre");
+  let last = 0;
+  for (const qt of [...quotes].sort((a, b) => a.start - b.start)) {
+    pre.append(text.slice(last, qt.start), el("mark", { textContent: text.slice(qt.start, qt.end) }));
+    last = qt.end;
+  }
+  pre.append(text.slice(last));
+  return pre;
+}
 
 async function ask() {
   const question = q.value.trim();
   if (!question) return;
-  btn.disabled = true; status.textContent = "Thinking…"; ans.hidden = true; list.replaceChildren();
+  btn.disabled = true; status.textContent = "Searching the documents…";
+  ans.hidden = true; title.hidden = true; list.replaceChildren();
   try {
     const r = await fetch("/ask", { method: "POST", headers: { "Content-Type": "application/json" },
                                     body: JSON.stringify({ question }) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    ans.textContent = data.answer; ans.hidden = false;
+    renderAnswer(data.answer, new Set(data.sources.map(s => s.n)));
+    ans.hidden = false;
     for (const s of data.sources) {
-      const li = document.createElement("li"), a = document.createElement("a"), p = document.createElement("div");
-      li.value = s.n;
-      a.href = s.url; a.target = "_blank"; a.rel = "noopener"; a.textContent = s.filename;
-      p.className = "snippet"; p.textContent = s.snippet;
-      li.append(a, s.location ? ` (${s.location})` : "", p);
-      list.append(li);
+      const quotes = (s.quotes || []).map(qt =>
+        el("blockquote", {}, `“${qt.text.replace(/\s+/g, " ")}”`, el("small", { textContent: qt.location })));
+      list.append(el("li", { id: `source-${s.n}`, value: s.n },
+        el("a", { href: s.url, target: "_blank", rel: "noopener", textContent: s.filename }),
+        s.location ? el("span", { className: "loc", textContent: ` · ${s.location}` }) : null,
+        ...quotes,
+        s.text ? el("details", {}, el("summary", { textContent: "Show in context" }), highlighted(s.text, s.quotes || [])) : null));
     }
+    if (!data.sources.length && data.related?.length) {
+      for (const d of data.related) {
+        list.append(el("li", {}, el("a", { href: d.url, target: "_blank", rel: "noopener", textContent: d.filename }),
+          d.location ? el("span", { className: "loc", textContent: ` · ${d.location}` }) : null));
+      }
+      title.textContent = "Closest documents";
+    } else {
+      title.textContent = "Sources";
+    }
+    title.hidden = !list.children.length;
     status.textContent = "";
   } catch (e) {
     status.textContent = "Error: " + e.message;

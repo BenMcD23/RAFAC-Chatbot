@@ -14,10 +14,15 @@ from docx.oxml.ns import qn
 from docx.table import Table
 from tqdm import tqdm
 
+import cite
 import rag
 
-# ponytail: 500 not 800 because bge-base truncates at 512 tokens; raise if EMBED_MODEL has a longer context
-CHUNK_TOKENS, OVERLAP_TOKENS = 500, 100
+# ponytail: 450 because bge-base truncates at 512 tokens and rag.passage() adds the title/section
+# on top; raise if EMBED_MODEL has a longer context
+CHUNK_TOKENS, OVERLAP_TOKENS = 450, 100
+# Bump when what's stored per chunk changes, so the next ingest redoes every file rather than
+# leaving unchanged files in the old shape. 2: block spans (page/para of every line), titled embeddings.
+INDEX_VERSION = 2
 SUPPORTED = {".pdf", ".docx"}
 STATE_FILE = rag.HERE / "data" / "state.json"
 log = logging.getLogger("ingest")
@@ -27,10 +32,23 @@ def pdf_blocks(path):
     with pymupdf.open(path) as doc:
         if doc.needs_pass:
             raise ValueError("password-protected")
+        number = None
         for page in doc:
             for b in page.get_text("blocks"):
-                if b[6] == 0 and b[4].strip():  # b[6] == 0 means a text block, not an image
-                    yield b[4].strip(), {"page": page.number + 1}
+                if b[6] != 0 or not b[4].strip():  # b[6] == 0 means a text block, not an image
+                    continue
+                text = b[4].strip()
+                # A paragraph number set in the margin comes out as its own block; join it to its text.
+                if cite.is_para_number(text):
+                    if number:
+                        yield number, {"page": page.number + 1, "para": cite.para_label(number)}
+                    number = text
+                    continue
+                if number:
+                    text, number = f"{number} {text}", None
+                yield text, {"page": page.number + 1, "para": cite.para_label(text)}
+        if number:
+            yield number, {"page": doc.page_count, "para": cite.para_label(number)}
 
 
 def is_heading(p):
@@ -63,11 +81,16 @@ def docx_blocks(path):
             continue
         if is_heading(item):
             section = text
-        yield text, {"section": section}
+        yield text, {"section": section, "para": cite.para_label(text)}
 
 
 def chunk(blocks, tok):
-    """Pack paragraph blocks into chunks of <= CHUNK_TOKENS, carrying ~OVERLAP_TOKENS of trailing blocks forward."""
+    """Pack paragraph blocks into chunks of <= CHUNK_TOKENS, carrying ~OVERLAP_TOKENS of trailing blocks forward.
+
+    Returns (text, meta, spans) per chunk. spans maps character ranges of text back to where
+    they came from ([start, end, page or 0, "page 4, para 12"]), so a quote anywhere in the
+    chunk can be pinned to its own page and paragraph, not just the chunk's first one.
+    """
     pieces = []  # (text, meta, n_tokens)
     for text, meta in blocks:
         offs = tok(text, add_special_tokens=False, return_offsets_mapping=True, verbose=False)["offset_mapping"]
@@ -96,7 +119,27 @@ def chunk(blocks, tok):
         cur.append(p)
     if cur:
         chunks.append(cur)
-    return [("\n\n".join(x[0] for x in c), c[0][1]) for c in chunks]
+    return [("\n\n".join(x[0] for x in c), c[0][1], _spans(c)) for c in chunks]
+
+
+def _spans(pieces):
+    spans, pos = [], 0
+    for text, meta, _ in pieces:
+        loc = cite.location(meta)
+        if spans and spans[-1][3] == loc and spans[-1][1] + 2 == pos:  # same paragraph, carry on
+            spans[-1][1] = pos + len(text)
+        else:
+            spans.append([pos, pos + len(text), meta.get("page") or 0, loc])
+        pos += len(text) + 2  # the "\n\n" between pieces
+    return spans
+
+
+def load_patterns():
+    return (yaml.safe_load((rag.HERE / "config.yaml").read_text()) or {}).get("exclude_patterns") or []
+
+
+def is_excluded(name, patterns):
+    return any(fnmatch(name.lower(), pat.lower()) for pat in patterns)
 
 
 def save_state(state):
@@ -109,7 +152,7 @@ def main():
     docs_dir = rag.DOCS_DIR
     if not docs_dir.is_dir():
         sys.exit(f"DOCS_DIR not found: {docs_dir}")
-    patterns = (yaml.safe_load((rag.HERE / "config.yaml").read_text()) or {}).get("exclude_patterns") or []
+    patterns = load_patterns()
     state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
     col = rag.get_collection()
     tok = rag.get_model().tokenizer
@@ -123,7 +166,7 @@ def main():
             unsupported[p.suffix.lower() or "(none)"] += 1
             log.info("Skipping unsupported file: %s", rel)
             continue
-        if any(fnmatch(p.name.lower(), pat.lower()) for pat in patterns):
+        if is_excluded(p.name, patterns):
             excluded += 1
             continue
         wanted[rel] = p
@@ -140,7 +183,7 @@ def main():
     for rel, p in tqdm(wanted.items(), desc="Indexing", unit="file"):
         try:
             h = hashlib.sha256(p.read_bytes()).hexdigest()
-            if state.get(rel, {}).get("hash") == h:
+            if state.get(rel, {}).get("hash") == h and state[rel].get("v") == INDEX_VERSION:
                 unchanged += 1
                 continue
             blocks = list(pdf_blocks(p) if p.suffix.lower() == ".pdf" else docx_blocks(p))
@@ -148,14 +191,17 @@ def main():
             col.delete(where={"path": rel})
             if chunks:
                 mtime = datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds")
+                # Chroma metadata can't hold None or lists: keep where the chunk starts, spans as JSON.
+                metas = [{"path": rel, "filename": p.name, "chunk": i, "mtime": mtime, "spans": json.dumps(spans),
+                          **{k: v for k, v in meta.items() if k in ("page", "section") and v}}
+                         for i, (_, meta, spans) in enumerate(chunks)]
                 col.add(
                     ids=[f"{rel}::{i}" for i in range(len(chunks))],
-                    documents=[text for text, _ in chunks],
-                    embeddings=rag.embed([text for text, _ in chunks]),
-                    metadatas=[{"path": rel, "filename": p.name, "chunk": i, "mtime": mtime, **meta}
-                               for i, (_, meta) in enumerate(chunks)],
+                    documents=[text for text, _, _ in chunks],
+                    embeddings=rag.embed([rag.passage(m, text) for m, (text, _, _) in zip(metas, chunks)]),
+                    metadatas=metas,
                 )
-            state[rel] = {"hash": h, "chunks": len(chunks)}
+            state[rel] = {"hash": h, "chunks": len(chunks), "v": INDEX_VERSION}
             save_state(state)
             indexed += 1
         except Exception as e:  # one bad file must never abort the run
