@@ -17,4 +17,4 @@ configMapGenerator:
 
 images:
   - name: ghcr.io/benmcd23/chatbot
-    newTag: v1.1
+    newTag: v1.4
