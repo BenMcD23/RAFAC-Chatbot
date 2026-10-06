@@ -1,5 +1,8 @@
 # Glob patterns matched against the filename (case-insensitive). Matching files are not indexed.
-# "form" must be followed by a separator so "Information..." isn't caught (would catch "Platform 2" if one appears).
+# "form" must be a word of its own: separated on both sides, so "Information..." and
+# "Uniform Guide" aren't caught (a bare "*form[ _.-]*" matched "uniform ").
 exclude_patterns:
-  - "*form[ _.-]*"
-  - "*forms[ _.-]*"
+  - "form[ _.-]*"
+  - "forms[ _.-]*"
+  - "*[ _.-]form[ _.-]*"
+  - "*[ _.-]forms[ _.-]*"
